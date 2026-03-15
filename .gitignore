@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.claude/
+output/
+data/raw/
+data/processed/
+*.log
