@@ -68,6 +68,16 @@ def sort_entities(entities: list) -> list:
     return ordered + remaining
 
 
+def _add_calculated_to_dict(data: dict) -> dict:
+    """인건비 / 기타 / 매출총이익 / 판관비 / 영업이익 계산 후 dict에 주입"""
+    data["인건비"]     = sum(data.get(acc, 0.0) for acc in LABOR_ACCOUNTS)
+    data["기타"]       = sum(data.get(acc, 0.0) for acc in MISC_SGA_ACCOUNTS)
+    data["매출총이익"] = data.get("매출", 0.0) - data.get("매출원가", 0.0)
+    data["판관비"]     = sum(data.get(acc, 0.0) for acc in SGA_COMPONENTS)
+    data["영업이익"]   = data["매출총이익"] - data["판관비"]
+    return data
+
+
 def parse_period(period_str: str):
     """'2025_Q4' → (2025, 4)"""
     import re
@@ -426,6 +436,9 @@ def _write_comparison_table(ws, start_row: int, entity_label: str,
 
     for acct in account_list:
         ws.cell(row, 1).value = acct
+        if acct in CALCULATED_ACCOUNTS:
+            ws.cell(row, 1).fill = STYLE["calc"]
+            ws.cell(row, 1).font = FONT_BOLD
         _write_delta(row, 2,  qoq_b,  qoq_c,  acct)
         _write_delta(row, 6,  yoyq_b, yoyq_c, acct)
         _write_delta(row, 10, yoyy_b, yoyy_c, acct)
@@ -502,13 +515,15 @@ def _create_analysis_ws(wb: openpyxl.Workbook, pivot_sheet_name: str,
         yoyy_b = _get_pivot_section(pivot_ws, yoyy_acc_key, entity) if yoyy_acc_key else {}
         yoyy_c = _get_pivot_section(pivot_ws, tgt_acc_key,  entity)
 
+        # 인건비 / 기타 / 매출총이익 / 판관비 / 영업이익 계산값 주입
+        for d in (qoq_b, qoq_c, yoyq_b, yoyq_c, yoyy_b, yoyy_c):
+            _add_calculated_to_dict(d)
+
         # 계정 목록 결정
         if account_filter:
             all_accts_raw = account_filter
         else:
-            raw_accts = set(qoq_b) | set(qoq_c) | set(yoyq_b) | \
-                        set(yoyq_c) | set(yoyy_b) | set(yoyy_c)
-            all_accts_raw = sort_rev_accounts(list(raw_accts))
+            all_accts_raw = list(REV_ACCOUNT_ORDER)
 
         label = "전체 합계" if entity == "합계" else entity
         current_row = _write_comparison_table(
@@ -617,17 +632,32 @@ def create_sheet_total(wb: openpyxl.Workbook, pivot_sheet_name: str,
         row += 1
 
         # 계정 데이터
-        accts_raw = account_filter if account_filter else REV_ACCOUNT_ORDER
+        accts_raw = account_filter if account_filter else SGA_TARGET_ACCOUNTS
+        # 엔티티별 데이터 사전 로드 + 계산 계정(인건비/기타/매출총이익/판관비/영업이익) 주입
+        base_by_ent = {ent: _add_calculated_to_dict(
+            _get_pivot_section(pivot_ws, base_key, ent) if base_key else {}
+        ) for ent in entities_sorted}
+        comp_by_ent = {ent: _add_calculated_to_dict(
+            _get_pivot_section(pivot_ws, comp_key, ent)
+        ) for ent in entities_sorted}
+
         for acct in accts_raw:
             ws.cell(row, 1).value = acct
+            is_calc = acct in CALCULATED_ACCOUNTS
+            if is_calc:
+                ws.cell(row, 1).fill = STYLE["calc"]
+                ws.cell(row, 1).font = FONT_BOLD
             for ei, ent in enumerate(entities_sorted):
-                b = _get_pivot_section(pivot_ws, base_key, ent).get(acct, 0.0) if base_key else 0.0
-                c_val = _get_pivot_section(pivot_ws, comp_key, ent).get(acct, 0.0)
+                b     = base_by_ent[ent].get(acct, 0.0)
+                c_val = comp_by_ent[ent].get(acct, 0.0)
                 delta = c_val - b
-                rate = (delta / b * 100) if b != 0 else (0.0 if delta == 0 else float("inf"))
-                col = 2 + ei * 3
-                ws.cell(row, col).value = b
+                rate  = (delta / b * 100) if b != 0 else (0.0 if delta == 0 else float("inf"))
+                col   = 2 + ei * 3
+                ws.cell(row, col).value     = b
                 ws.cell(row, col + 1).value = c_val
+                if is_calc:
+                    ws.cell(row, col).fill     = STYLE["calc"]
+                    ws.cell(row, col + 1).fill = STYLE["calc"]
                 rate_cell = ws.cell(row, col + 2)
                 if rate == float("inf"):
                     rate_cell.value = "N/A"
